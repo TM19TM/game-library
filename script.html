@@ -1,0 +1,291 @@
+<script>
+  let TODOS_JOGOS = [];
+  let MODO_EDICAO = false;
+
+  document.addEventListener('DOMContentLoaded', inicializar);
+
+  function inicializar() {
+    ligarEventos();
+    carregarBibliotecas();
+    carregarDashboard();
+    carregarJogos();
+  }
+
+  function ligarEventos() {
+    document.getElementById('btnAdicionar').addEventListener('click', abrirModalAdicionar);
+    document.getElementById('btnFecharModal').addEventListener('click', fecharModal);
+    document.getElementById('modalOverlay').addEventListener('click', function (e) {
+      if (e.target === this) fecharModal();
+    });
+    document.getElementById('btnSalvar').addEventListener('click', salvarJogo);
+    document.getElementById('btnExcluir').addEventListener('click', confirmarExclusao);
+
+    document.getElementById('inputPesquisa').addEventListener('input', debounce(aplicarFiltros, 250));
+    document.getElementById('filtroBiblioteca').addEventListener('change', aplicarFiltros);
+    document.getElementById('filtroStatus').addEventListener('change', aplicarFiltros);
+  }
+
+  function debounce(fn, delay) {
+    let timer;
+    return function (...args) {
+      clearTimeout(timer);
+      timer = setTimeout(() => fn.apply(this, args), delay);
+    };
+  }
+
+  /* ================= Carregamento de dados ================= */
+
+  function carregarBibliotecas() {
+    google.script.run
+      .withSuccessHandler(function (bibliotecas) {
+        const selectCampo = document.getElementById('campoBiblioteca');
+        const selectFiltro = document.getElementById('filtroBiblioteca');
+        bibliotecas.forEach(function (b) {
+          const opt1 = document.createElement('option');
+          opt1.value = b; opt1.textContent = b;
+          selectCampo.appendChild(opt1);
+
+          const opt2 = document.createElement('option');
+          opt2.value = b; opt2.textContent = b;
+          selectFiltro.appendChild(opt2);
+        });
+      })
+      .withFailureHandler(mostrarErro)
+      .listarBibliotecas();
+  }
+
+  function carregarDashboard() {
+    google.script.run
+      .withSuccessHandler(atualizarDashboard)
+      .withFailureHandler(mostrarErro)
+      .getDashboardStats();
+  }
+
+  function carregarJogos() {
+    document.getElementById('loadingState').style.display = 'block';
+    google.script.run
+      .withSuccessHandler(function (jogos) {
+        console.log('Jogos recebidos da planilha:', jogos);
+        TODOS_JOGOS = Array.isArray(jogos) ? jogos : [];
+        if (!Array.isArray(jogos)) {
+          console.error('listarJogos() não retornou um array. Valor recebido:', jogos);
+        }
+        document.getElementById('loadingState').style.display = 'none';
+        aplicarFiltros();
+      })
+      .withFailureHandler(function (err) {
+        document.getElementById('loadingState').style.display = 'none';
+        mostrarErro(err);
+      })
+      .listarJogos();
+  }
+
+  function atualizarDashboard(stats) {
+    document.getElementById('statTotal').textContent = stats.totalJogos;
+    document.getElementById('statZerados').textContent = stats.totalZerados;
+    document.getElementById('statPlatinados').textContent = stats.totalPlatinados;
+    document.getElementById('statInvestido').textContent = formatarMoeda(stats.totalInvestido);
+    document.getElementById('statHoras').textContent = stats.totalHoras + 'h';
+  }
+
+  /* ================= Filtros e pesquisa ================= */
+
+  function aplicarFiltros() {
+    const termo = document.getElementById('inputPesquisa').value.trim().toLowerCase();
+    const biblioteca = document.getElementById('filtroBiblioteca').value;
+    const status = document.getElementById('filtroStatus').value;
+
+    const listaBase = Array.isArray(TODOS_JOGOS) ? TODOS_JOGOS : [];
+
+    let filtrados = listaBase.filter(function (j) {
+      if (termo && String(j.nome).toLowerCase().indexOf(termo) === -1) return false;
+      if (biblioteca && j.biblioteca !== biblioteca) return false;
+      if (status === 'zerado' && j.zerado !== 'Sim') return false;
+      if (status === 'naoZerado' && j.zerado !== 'Não') return false;
+      if (status === 'platinado' && j.platinado !== 'Sim') return false;
+      if (status === 'naoPlatinado' && j.platinado !== 'Não') return false;
+      if (status === 'gratuito' && Number(j.valor) !== 0) return false;
+      if (status === 'pago' && Number(j.valor) === 0) return false;
+      return true;
+    });
+
+    renderizarLista(filtrados);
+  }
+
+  /* ================= Renderização ================= */
+
+  function renderizarLista(jogos) {
+    const lista = document.getElementById('listaJogos');
+    const emptyState = document.getElementById('emptyState');
+
+    lista.innerHTML = '';
+
+    if (!jogos.length) {
+      emptyState.style.display = 'block';
+      return;
+    }
+    emptyState.style.display = 'none';
+
+    jogos.forEach(function (jogo, index) {
+      try {
+        const card = document.createElement('div');
+        card.className = 'jogo-card' + (jogo.pretendePlatinar === 'Sim' ? ' pretende-platinar' : '');
+        card.addEventListener('click', function () { abrirModalEditar(jogo); });
+
+        card.innerHTML = `
+          <h3 class="jogo-nome">${escapeHtml(jogo.nome)}</h3>
+          <span class="jogo-biblioteca">${escapeHtml(jogo.biblioteca)}</span>
+          <div class="jogo-valor">${formatarMoeda(jogo.valor)}${jogo.tempoJogado ? ' · ' + escapeHtml(String(jogo.tempoJogado)) : ''}</div>
+          <div class="jogo-badges">
+            <span class="badge ${jogo.zerado === 'Sim' ? 'on' : ''}">✅ Zerado: ${jogo.zerado}</span>
+            <span class="badge ${jogo.platinado === 'Sim' ? 'on' : ''}">🏆 Platinado: ${jogo.platinado}</span>
+            ${jogo.pretendePlatinar === 'Sim' ? '<span class="badge badge-danger">🔴 Pretendo platinar</span>' : ''}
+          </div>
+        `;
+        lista.appendChild(card);
+      } catch (erroCard) {
+        // Não deixa um registro problemático travar o resto da lista.
+        console.error('Falha ao renderizar o jogo no índice ' + index + ':', jogo, erroCard);
+      }
+    });
+
+    if (lista.children.length === 0 && jogos.length > 0) {
+      console.error('Todos os ' + jogos.length + ' jogo(s) retornado(s) falharam ao renderizar. Veja os erros acima.');
+      mostrarErro('Houve um problema ao exibir os jogos. Veja o console (F12) para detalhes.');
+    }
+  }
+
+  /* ================= Modal ================= */
+
+  function abrirModalAdicionar() {
+    MODO_EDICAO = false;
+    document.getElementById('modalTitulo').textContent = 'Adicionar Jogo';
+    document.getElementById('btnExcluir').style.display = 'none';
+    limparFormulario();
+    document.getElementById('modalOverlay').classList.add('open');
+  }
+
+  function abrirModalEditar(jogo) {
+    MODO_EDICAO = true;
+    document.getElementById('modalTitulo').textContent = 'Editar Jogo';
+    document.getElementById('btnExcluir').style.display = 'inline-block';
+
+    document.getElementById('jogoId').value = jogo.id;
+    document.getElementById('campoNome').value = jogo.nome;
+    document.getElementById('campoBiblioteca').value = jogo.biblioteca;
+    document.getElementById('campoValor').value = jogo.valor;
+    document.getElementById('campoZerado').value = jogo.zerado;
+    document.getElementById('campoPlatinado').value = jogo.platinado;
+    document.getElementById('campoTempo').value = jogo.tempoJogado || '';
+    document.getElementById('campoObservacoes').value = jogo.observacoes || '';
+    document.getElementById('campoPretendePlatinar').checked = jogo.pretendePlatinar === 'Sim';
+
+    document.getElementById('modalOverlay').classList.add('open');
+  }
+
+  function fecharModal() {
+    document.getElementById('modalOverlay').classList.remove('open');
+  }
+
+  function limparFormulario() {
+    document.getElementById('jogoId').value = '';
+    document.getElementById('campoNome').value = '';
+    document.getElementById('campoBiblioteca').selectedIndex = 0;
+    document.getElementById('campoValor').value = '';
+    document.getElementById('campoZerado').value = 'Não';
+    document.getElementById('campoPlatinado').value = 'Não';
+    document.getElementById('campoTempo').value = '';
+    document.getElementById('campoObservacoes').value = '';
+    document.getElementById('campoPretendePlatinar').checked = false;
+  }
+
+  /* ================= Ações (salvar / excluir) ================= */
+
+  function salvarJogo() {
+    const nome = document.getElementById('campoNome').value.trim();
+    const biblioteca = document.getElementById('campoBiblioteca').value;
+
+    if (!nome) { mostrarErro('O nome do jogo é obrigatório.'); return; }
+    if (!biblioteca) { mostrarErro('Selecione uma biblioteca.'); return; }
+
+    const dados = {
+      nome: nome,
+      biblioteca: biblioteca,
+      valor: document.getElementById('campoValor').value,
+      zerado: document.getElementById('campoZerado').value,
+      platinado: document.getElementById('campoPlatinado').value,
+      tempoJogado: document.getElementById('campoTempo').value.trim(),
+      observacoes: document.getElementById('campoObservacoes').value.trim(),
+      pretendePlatinar: document.getElementById('campoPretendePlatinar').checked
+    };
+
+    const btn = document.getElementById('btnSalvar');
+    btn.disabled = true;
+    btn.textContent = 'Salvando...';
+
+    const idJogo = document.getElementById('jogoId').value;
+
+    const aoConcluir = function (res) {
+      btn.disabled = false;
+      btn.textContent = 'Salvar';
+      mostrarToast(res.mensagem);
+      fecharModal();
+      carregarDashboard();
+      carregarJogos();
+    };
+    const aoFalhar = function (err) {
+      btn.disabled = false;
+      btn.textContent = 'Salvar';
+      mostrarErro(err);
+    };
+
+    if (MODO_EDICAO && idJogo) {
+      google.script.run.withSuccessHandler(aoConcluir).withFailureHandler(aoFalhar).editarJogo(idJogo, dados);
+    } else {
+      google.script.run.withSuccessHandler(aoConcluir).withFailureHandler(aoFalhar).adicionarJogo(dados);
+    }
+  }
+
+  function confirmarExclusao() {
+    const idJogo = document.getElementById('jogoId').value;
+    const nome = document.getElementById('campoNome').value;
+    if (!idJogo) return;
+
+    if (!confirm('Excluir "' + nome + '" da sua biblioteca?')) return;
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        mostrarToast(res.mensagem);
+        fecharModal();
+        carregarDashboard();
+        carregarJogos();
+      })
+      .withFailureHandler(mostrarErro)
+      .excluirJogo(idJogo);
+  }
+
+  /* ================= Utilitários ================= */
+
+  function formatarMoeda(valor) {
+    const n = Number(valor) || 0;
+    return 'R$ ' + n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str == null ? '' : String(str);
+    return div.innerHTML;
+  }
+
+  function mostrarToast(mensagem, tipo) {
+    const toast = document.getElementById('toast');
+    toast.textContent = mensagem;
+    toast.className = 'toast show' + (tipo === 'error' ? ' error' : '');
+    setTimeout(function () { toast.className = 'toast'; }, 3000);
+  }
+
+  function mostrarErro(err) {
+    const mensagem = (err && err.message) ? err.message : String(err);
+    mostrarToast(mensagem, 'error');
+  }
+</script>
